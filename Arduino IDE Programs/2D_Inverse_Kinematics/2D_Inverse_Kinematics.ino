@@ -1,23 +1,34 @@
 #include <Servo.h>
 #include <math.h>
+#include <Adafruit_VL53L0X.h>
+#include <SPI.h>
+#include <Pixy2.h>
+#include <Wire.h>
+
 
 // Pin Definitions
-const int shoulderPin = 5;
+const int shoulderPin = 2;
 const int elbowPin = 3;
+const int wristPin = 5;
 
 // Link Lengths in mm
 const float L1 = 155.0; 
-const float L2 = 155.0;
+const float L2 = 155.0; // May need to debug L2 + L3 for new length to end effector (hand) position
+const float L3 = 23.0;
 
-// Servo MIN and MAX range
-const int shoulderMinRange = 0;
-const int shoulderMaxRange = 145;
-const int elbowMinRange = 0;
-const int elbowMaxRange = 180;
+// Current X and Y link lengths
+float currentX = 155.0 + L3; 
+float currentY = 155.0;
+
+// Servo Initial States
+const int initialShoulder = 90;
+const int initialElbow = 90;
+const int initialWrist = 145;
 
 
 Servo shoulderServo;
 Servo elbowServo;
+Servo wristServo;
 
 /* The Logic Flow
 Calculate the distance (r) to the target
@@ -30,6 +41,35 @@ Map to Servo units: Convert radians to degrees.
 const int SERVO_MIN_PULSE = 500;  // Microseconds for 0 degrees
 const int SERVO_MAX_PULSE = 2500; // Microseconds for 270 degrees
 const int SERVO_RANGE = 270;      // Total range in degrees
+
+// TOF CONFIGURATION
+#define XSHUT1 6
+#define XSHUT2 7
+
+Adafruit_VL53L0X tofX = Adafruit_VL53L0X();
+Adafruit_VL53L0X tofY = Adafruit_VL53L0X();
+
+//PIXY CONFIGURATION
+Pixy2 pixy;
+
+// TOF INITIALIZATION
+void initTOF(){
+
+  pinMode(XSHUT1, OUTPUT);
+  pinMode(XSHUT2, OUTPUT);
+
+  digitalWrite(XSHUT1, LOW);
+  digitalWrite(XSHUT2, LOW);
+  delay(100);
+
+  digitalWrite(XSHUT1, HIGH);
+  delay(100);
+  tofX.begin(0x30);
+
+  digitalWrite(XSHUT2, HIGH);
+  delay(100);
+  tofY.begin(0x31);
+}
 
 // Helper function to protect arm's motion with limits and constraints
 void armGuard(float r, float y) {
@@ -52,20 +92,17 @@ void armGuard(float r, float y) {
   }
 }
 
+// Helper function because the built in map() only uses integers
+float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
 void moveArm(float x, float y, bool elbowUp) {
   float r = sqrt(x*x + y*y);
   //armGuard(r, y);
-
-  // 1. SAFETY CHECK: The "Floor" (y-axis)
-  // Ensure the arm stays at least 10mm above the base plane
-  //float safeY = y;
   
-  // 2. SAFETY CHECK: The "Reach" (Radius)
-  //float safeX = x;
-  
-  // If too far out, pull it back to the 300mm limit
-  if (r > 300.0) {
+  // If too far out, pull it back to the 310mm limit
+  if (r > 310.0) {
     Serial.println("Warning: Target out of reach. Clipping to boundary.");
     Serial.print("Invalid (x, y) coordinates: (");
     Serial.print(x);
@@ -73,7 +110,7 @@ void moveArm(float x, float y, bool elbowUp) {
     Serial.print(y);
     Serial.println(")");
 
-    float scale = 300.0 / r;
+    float scale = 310.0 / r;
     x = x * scale;
     y = y * scale;
 
@@ -127,6 +164,7 @@ void moveArm(float x, float y, bool elbowUp) {
 
   float shoulderDeg = degrees(theta1);
   float elbowDeg = degrees(theta2);
+  float wristDeg = -(shoulderDeg + elbowDeg);
 
   // --- ADJUSTED MAPPING ---
   
@@ -137,39 +175,84 @@ void moveArm(float x, float y, bool elbowUp) {
   // Let's assume 135 is "straight" for your elbow
   float finalElbow = 135.0 + elbowDeg; 
 
-  // 3. Convert to microseconds
+  // 3. Wrist: Maintain parallel to floor/table
+  float finalWrist = 204 + wristDeg;
+
+  // Convert to microseconds
   int shoulderuS = mapFloat(finalShoulder, 0, 270, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
   int elbowuS = mapFloat(finalElbow, 0, 270, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
+  int wristuS = mapFloat(finalWrist, 0, 270, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
 
   shoulderServo.writeMicroseconds(constrain(shoulderuS, SERVO_MIN_PULSE, SERVO_MAX_PULSE));
   elbowServo.writeMicroseconds(constrain(elbowuS, SERVO_MIN_PULSE, SERVO_MAX_PULSE));
+  wristServo.writeMicroseconds(constrain(wristuS, SERVO_MIN_PULSE, SERVO_MAX_PULSE));
 
-  Serial.print("End effector currently sitting at: (");
-  Serial.print(x);
-  Serial.print(", ");
-  Serial.print(y);
-  Serial.println(")");
+  // Serial.print("End effector currently sitting at: (");
+  // Serial.print(x);
+  // Serial.print(", ");
+  // Serial.print(y);
+  // Serial.println(")");
 
-  Serial.print("Shoulder Theta1: ");
-  Serial.println(shoulderDeg);
-  Serial.print("Elbow Theta2: ");
-  Serial.println(elbowDeg);
+  // Serial.print("Shoulder Theta1: ");
+  // Serial.println(shoulderDeg);
+  // Serial.print("Elbow Theta2: ");
+  // Serial.println(elbowDeg);
+  // Serial.print("Wrist Theta: ");
+  // Serial.println(wristDeg);
 }
 
-// Helper function because the built in map() only uses integers
-float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+// Linear Interpolation (LERP) aka coordinated motion
+// Breaking up movement into a bunch of small "waypoints" and moving through at a set speed rather than asap
+// 1. Store current position
+// 2. Divide the distance (start and end into small steps, in this case 2mm per step)
+// 3. Time the steps (use delay() to control velocity)
+void moveSmoothly(float x, float y, bool elbowUp, float speed) {
+  // 1. Calculate how far it needs to travel
+  float dx = x - currentX;
+  float dy = y - currentY;
+  float distance = sqrt(dx*dx + dy*dy);
+  
+  // 2. Determine how many steps to take (e.g., 1 step per 2mm)
+  int steps = distance / 2.0; 
+  if (steps < 1) steps = 1; // Ensure at least one step
+
+  for (int i = 1; i <= steps; i++) {
+    // 3. Calculate the intermediate "waypoint"
+    float intermediateX = currentX + (dx * i / steps);
+    float intermediateY = currentY + (dy * i / steps);
+    
+    // 4. Calculates the IK and the level wrist angle for THIS specific spot
+    moveArm(intermediateX, intermediateY, elbowUp);
+    
+    // 5. Control the speed (lower delay = faster motion)
+    delay(speed); 
+  }
+
+  // 6. Update current position for the next move
+  currentX = x;
+  currentY = y;
 }
 
 
 void setup() {
   Serial.begin(9600);
+  SPI.begin();
+  Wire.begin();
+
   shoulderServo.attach(shoulderPin);
   elbowServo.attach(elbowPin);
+  wristServo.attach(wristPin);
+
   // Move to a safe starting position
-  shoulderServo.write(90);
-  elbowServo.write(90);
+  shoulderServo.write(initialShoulder);
+  elbowServo.write(initialElbow);
+  wristServo.write(initialWrist);
   delay(1000);
+
+  initTOF();
+  pixy.init();
+  Serial.println("Ready to begin");
+  delay(3000);
 }
 
 void loop() {
@@ -213,28 +296,78 @@ void loop() {
   // moveArm(219.2031, 219.2031, true);
   // delay(2000);
 
-  // moveArm(30, 100, true);
-  // delay(3000);
-  // moveArm(30, 100, false);
-  // delay(3000);
-  // moveArm(100, 30, true);
-  // delay(3000);
-  // moveArm(100, 30, false);
-  // delay(3000);
-  // moveArm(50, 80, true);
-  // delay(3000);
-  // moveArm(50, 80, false);
-  // delay(3000);
-  // moveArm(80, 50, true);
-  // delay(3000);
-  // moveArm(80, 50, false);
-  // delay(3000);
-  // moveArm(65, 65, true);
-  // delay(3000);
-  // moveArm(65, 65, false);
-  // delay(3000);
+  // moveArm(10, 10, true);
+  // delay(2000);
 
-  moveArm(10, 10, true);
-  delay(2000);
+  VL53L0X_RangingMeasurementData_t measureX;
+  VL53L0X_RangingMeasurementData_t measureY;
+
+  tofX.rangingTest(&measureX, false);
+  tofY.rangingTest(&measureY, false);
+
+  // Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  // Serial.println(" mm");
+  // delay(500);
+
+  // moveSmoothly(250, 50, true, 20); 
+  // delay(1500);
+  // tofX.rangingTest(&measureX, false);
+  // tofY.rangingTest(&measureY, false);
+  // Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  // Serial.println(" mm");
+  
+  // moveSmoothly(155, 155, true, 20);
+  // delay(1500);
+  // tofX.rangingTest(&measureX, false);
+  // tofY.rangingTest(&measureY, false);
+  // Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  // Serial.println(" mm");
+
+  // moveSmoothly(0, 310, true, 20);
+  // delay(1500);
+  // tofX.rangingTest(&measureX, false);
+  // tofY.rangingTest(&measureY, false);
+  // Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  // Serial.println(" mm");
+
+  moveSmoothly(310, 0, true, 20);
+  delay(1500);
+  tofX.rangingTest(&measureX, false);
+  tofY.rangingTest(&measureY, false);
+  Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  Serial.println(" mm");
+
+  // moveSmoothly(155, 155, false, 20);
+  // delay(1500);
+  // tofX.rangingTest(&measureX, false);
+  // tofY.rangingTest(&measureY, false);
+  // Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  // Serial.println(" mm");
+
+  // moveSmoothly(219.20, 219.20, true, 20);
+  // delay(1500);
+  // tofX.rangingTest(&measureX, false);
+  // tofY.rangingTest(&measureY, false);
+  // Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  // Serial.println(" mm");
 
 }
+
+
+
+/*
+Path planning next step
+Path planning algorithms
+Or
+Figiure out how many passes side to side to top to bottom needs to occur
+Step 1. Simple path planning, where to paint// Pre program path and surface
+
+step. 2 Compute surface
+After, snap shots with camera and coordinating "pictures" to find cornerrs of each and make a larger image*/
