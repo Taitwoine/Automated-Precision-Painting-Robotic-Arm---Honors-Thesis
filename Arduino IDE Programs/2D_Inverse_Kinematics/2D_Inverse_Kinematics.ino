@@ -21,9 +21,9 @@ float currentX = 155.0 + L3;
 float currentY = 155.0;
 
 // Servo Initial States
-const int initialShoulder = 90;
-const int initialElbow = 90;
-const int initialWrist = 145;
+const int initialShoulder = 60;
+const int initialElbow = 45;
+const int initialWrist = 125;
 
 
 Servo shoulderServo;
@@ -54,7 +54,6 @@ Pixy2 pixy;
 
 // TOF INITIALIZATION
 void initTOF(){
-
   pinMode(XSHUT1, OUTPUT);
   pinMode(XSHUT2, OUTPUT);
 
@@ -70,7 +69,7 @@ void initTOF(){
   delay(100);
   tofY.begin(0x31);
 }
-
+//-----------------------------------------------------------------------------------------------------
 // Helper function to protect arm's motion with limits and constraints
 void armGuard(float r, float y) {
   // 1. Max Reach Check
@@ -91,12 +90,12 @@ void armGuard(float r, float y) {
     return;
   }
 }
-
+//-----------------------------------------------------------------------------------------------------
 // Helper function because the built in map() only uses integers
 float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
-
+//-----------------------------------------------------------------------------------------------------
 void moveArm(float x, float y, bool elbowUp) {
   float r = sqrt(x*x + y*y);
   //armGuard(r, y);
@@ -200,7 +199,7 @@ void moveArm(float x, float y, bool elbowUp) {
   // Serial.print("Wrist Theta: ");
   // Serial.println(wristDeg);
 }
-
+//-----------------------------------------------------------------------------------------------------
 // Linear Interpolation (LERP) aka coordinated motion
 // Breaking up movement into a bunch of small "waypoints" and moving through at a set speed rather than asap
 // 1. Store current position
@@ -232,8 +231,105 @@ void moveSmoothly(float x, float y, bool elbowUp, float speed) {
   currentX = x;
   currentY = y;
 }
+//-----------------------------------------------------------------------------------------------------
+void runSquarePath() {
+  // 1. Get Diameter from User
+  while (Serial.available() == 0) {} // Wait for input
+  float diameter = Serial.parseFloat();
+  
+  // Clean the buffer
+  while(Serial.available() > 0) Serial.read();
 
+  // Validate Range
+  if (diameter < 5 || diameter > 20) {
+    Serial.println("Error: Diameter must be between 5mm and 20mm.");
+    return;
+  }
 
+  // 2. Calculate Radius and Bounding Box
+  float radius = diameter / 2.0;
+  float minLimit = 40 + radius;
+  float maxLimit = 214 - radius;
+
+  Serial.print("Starting path with Radius: ");
+  Serial.println(radius);
+
+  // 3. Generate Raster Path (Snake Pattern)
+  // Move in increments of the diameter to ensure coverage
+  for (float y = minLimit; y <= maxLimit; y += diameter) {
+    
+    // If Y is an even multiple of diameter, go Left -> Right
+    // If Y is an odd multiple, go Right -> Left
+    int row = (int)((y - minLimit) / diameter);
+    
+    if (row % 2 == 0) {
+      // Left to Right
+      moveSmoothly(minLimit, y, true, 15);
+      moveSmoothly(maxLimit, y, true, 15);
+    } else {
+      // Right to Left
+      moveSmoothly(maxLimit, y, true, 15);
+      moveSmoothly(minLimit, y, true, 15);
+    }
+  }
+  
+  Serial.println("Path Complete!");
+  // Return to a neutral home position
+  moveSmoothly(155, 155, true, 15);
+}
+//-----------------------------------------------------------------------------------------------------
+void runPolarArcPath() {
+  // 1. Get Diameter and Calculate Radius
+  while (Serial.available() == 0) {} 
+  float diameter = Serial.parseFloat();
+  while(Serial.available() > 0) Serial.read();
+
+  if (diameter < 5 || diameter > 20) {
+    Serial.println("Error: Keep diameter between 5-20mm.");
+    return;
+  }
+
+  // 2. Define the Sweep Constraints
+  // Angle in degrees: 0 is flat right, 90 is straight up.
+  float minAngle = 10.0;  // Start 10 degrees off the X-axis
+  float maxAngle = 80.0;  // End 10 degrees before the Y-axis
+  
+  float maxReach = 310.0 - (diameter / 2.0); // Full extension minus spray radius
+  float minReach = 60.0;                     // Minimum extension to avoid base
+
+  Serial.println("Starting Polar Sweep Path...");
+
+  // 3. The Radial Loop (Moving from far reach back toward the base)
+  for (float r = maxReach; r >= minReach; r -= diameter) {
+    
+    // Determine if we are sweeping "Up" or "Down" the arc
+    int layer = (int)((maxReach - r) / diameter);
+    
+    if (layer % 2 == 0) {
+      // Sweep from 10 deg to 80 deg
+      for (float deg = minAngle; deg <= maxAngle; deg += 2.0) {
+        float rad = radians(deg);
+        float targetX = r * cos(rad);
+        float targetY = r * sin(rad);
+        moveSmoothly(targetX, targetY, true, 15); 
+        delay(10); // Control sweep speed
+      }
+    } else {
+      // Sweep from 80 deg back to 10 deg
+      for (float deg = maxAngle; deg >= minAngle; deg -= 2.0) {
+        float rad = radians(deg);
+        float targetX = r * cos(rad);
+        float targetY = r * sin(rad);
+        moveSmoothly(targetX, targetY, true, 15);
+        delay(10);
+      }
+    }
+  }
+
+  Serial.println("Polar Path Complete!");
+  moveSmoothly(155, 155, true, 15); // Return to home
+}
+//-----------------------------------------------------------------------------------------------------
 void setup() {
   Serial.begin(9600);
   SPI.begin();
@@ -252,10 +348,20 @@ void setup() {
   initTOF();
   pixy.init();
   Serial.println("Ready to begin");
+  Serial.println("Enter the diameter of the spray's cone in mm (range is 5-20 mm): ");
   delay(3000);
 }
-
+//-----------------------------------------------------------------------------------------------------
 void loop() {
+  if (Serial.available() > 0) {
+    runSquarePath();
+    Serial.println("Enter a new diameter (5-20mm) to run again:");
+  }
+  if (Serial.available() > 0) {
+    runPolarArcPath();
+    Serial.println("Enter a new diameter (5-20mm) to run again:");
+  }
+
   // Test Cases (x,y)
 
   // (0, L1 + L2) Full Extension Up: straight up y axis
@@ -334,13 +440,13 @@ void loop() {
   // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
   // Serial.println(" mm");
 
-  moveSmoothly(310, 0, true, 20);
-  delay(1500);
-  tofX.rangingTest(&measureX, false);
-  tofY.rangingTest(&measureY, false);
-  Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
-  Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
-  Serial.println(" mm");
+  // moveSmoothly(310, 0, true, 20);
+  // delay(1500);
+  // tofX.rangingTest(&measureX, false);
+  // tofY.rangingTest(&measureY, false);
+  // Serial.print("X-axis: "); Serial.print(measureX.RangeMilliMeter);
+  // Serial.print(" mm | Y-axis: "); Serial.print(measureY.RangeMilliMeter);
+  // Serial.println(" mm");
 
   // moveSmoothly(155, 155, false, 20);
   // delay(1500);
@@ -366,8 +472,16 @@ void loop() {
 Path planning next step
 Path planning algorithms
 Or
-Figiure out how many passes side to side to top to bottom needs to occur
+Figure out how many passes side to side to top to bottom needs to occur
 Step 1. Simple path planning, where to paint// Pre program path and surface
 
 step. 2 Compute surface
-After, snap shots with camera and coordinating "pictures" to find cornerrs of each and make a larger image*/
+After, snap shots with camera and coordinating "pictures" to find cornerrs of each and make a larger image
+
+Bounding box coordinates (Locate corners)
+
+1st, assume bounding box coordinates are known
+
+2nd Compute bounding box coordinates and size with camera and sensors
+
+Find radius/diameter of cone spray to compute number of passes*/
