@@ -112,7 +112,6 @@ void getVisionData() {
     runSquarePath(targetX, targetY, areaWidth);
   }
 }
-
 //-----------------------------------------------------------------------------------------------------
 // Helper function to protect arm's motion with limits and constraints
 void armGuard(float r, float y) {
