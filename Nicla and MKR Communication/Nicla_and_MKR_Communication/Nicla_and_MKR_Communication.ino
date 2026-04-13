@@ -12,9 +12,9 @@ const int elbowPin = 3;
 const int wristPin = 5;
 
 // Link Lengths in mm
-const float L1 = 155.0; 
-const float L2 = 155.0;
-const float L3 = 23.0;
+const float L1 = 160.0; 
+const float L2 = 160.0;
+const float L3 = 25.0;
 
 // Current X and Y link lengths
 float currentX = 155.0 + L3; 
@@ -22,9 +22,13 @@ float currentY = 155.0;
 
 // Servo Initial States
 const int initialShoulder = 60;
-const int initialElbow = 45;
+const int initialElbow = 40;
 const int initialWrist = 125;
 
+// Pixel-to-Millimeter Ratios
+const int horizontalRatio = 0.44375; // 142 mm / 320 pixels
+const int verticalRatio = 0.45416; // 109 mm / 240 pixels
+const int averageRatio = 0.449;
 
 Servo shoulderServo;
 Servo elbowServo;
@@ -62,30 +66,53 @@ void initTOF(){
 #define NICLA 0x12 // Default OpenMV Nicla Vision I2C address
 // Helper function for communication between Nicla Vision and MKR 1010
 void getVisionData() {
-  Wire.requestFrom(NICLA, 4); 
+  // 1. Request 5 bytes from the Nicla (0x12)
+  Wire.requestFrom(0x12, 5); 
   
-  if (Wire.available() >= 4) {
-    // Read and scale back up to 320x240
-    int x_pixel = Wire.read() * 2; 
-    int y_pixel = Wire.read() * 2;
-    int w_pixel = Wire.read() * 2; 
-    int h_pixel = Wire.read() * 2;
+  if (Wire.available() >= 5) {
+    // 2. Read raw bytes and scale back to image dimensions (320x240)
+    int x_pix  = Wire.read() * 2; // X coord
+    int y_pix  = Wire.read() * 2; // Y coord
+    int w_pix  = Wire.read() * 2; // Camera bound width
+    int h_pix  = Wire.read() * 2; // Camera bound height
+    int z_dist = Wire.read() * 2; // Surface distance from ToF
 
-    // REAL WORLD CALIBRATION
-    const float mmPerPixel = 1.1; // i.e. each pixel is 1.1mm @174mm
+    // 3. Serial Feedback for Debugging
+    Serial.println("--- Vision Update ---");
+    Serial.print(" ToF Distance: "); Serial.print(z_dist); Serial.println(" mm");
 
-    // Map to 50mm - 310mm reach
-    float startX = mapFloat(x_pixel, 0, 320, 50, 310); 
-    float startY = mapFloat(y_pixel, 0, 240, 50, 310);
-    float areaWidth = mapFloat(w_pixel, 0, 320, 0, 260); 
+    // 4. Spatial Calibration (The "Millimeters per Pixel" approach)
+    const float mmPerPixel = 0.265; 
+    
+    // Calculate offsets from the camera center (160, 120)
+    float diffX_pixels = x_pix - 160;
+    float diffY_pixels = y_pix - 120;
 
-    Serial.print("Target Found at X: "); Serial.print(startX);
-    Serial.print(" Y: "); Serial.println(startY);
-    Serial.println("Moving to Top-left to begin!");
+    // Convert pixel offsets to real-world millimeters
+    float offsetX_mm = diffX_pixels * mmPerPixel;
+    float offsetY_mm = diffY_pixels * mmPerPixel;
 
-    runSquarePath(startX, startY, areaWidth);
+    // 5. Map to Robot Coordinates
+    // Assuming camera center is physically at Robot (155, 155)
+    // Camera Y (up/down) maps to Robot X (reach)
+    // Camera X (left/right) maps to Robot Y (side-to-side)
+    float targetX = 155.0 - offsetY_mm; // Subtracting makes Camera Top = Max Reach
+    float targetY = 155.0 + offsetX_mm; 
+    float areaWidth = w_pix * mmPerPixel;
+
+    // 6. Safeguard Clipping
+    targetX = constrain(targetX, 50, 310);
+    targetY = constrain(targetY, 0, 310);
+
+    Serial.print("Target X: "); Serial.print(targetX);
+    Serial.print(" Y: "); Serial.println(targetY);
+    Serial.println("Moving to starting point...");
+
+    // 7. Execute the Raster Path
+    runSquarePath(targetX, targetY, areaWidth);
   }
 }
+
 //-----------------------------------------------------------------------------------------------------
 // Helper function to protect arm's motion with limits and constraints
 void armGuard(float r, float y) {
@@ -273,57 +300,57 @@ void runSquarePath(float startX, float startY, float totalWidth) {
   homePosition();
 }
 //-----------------------------------------------------------------------------------------------------
-void runPolarArcPath() {
-  // 1. Get Diameter and Calculate Radius
-  while (Serial.available() == 0) {} 
-  float diameter = Serial.parseFloat();
-  while(Serial.available() > 0) Serial.read();
+// void runPolarArcPath() {
+//   // 1. Get Diameter and Calculate Radius
+//   while (Serial.available() == 0) {} 
+//   float diameter = Serial.parseFloat();
+//   while(Serial.available() > 0) Serial.read();
 
-  if (diameter < 1 || diameter > 20) {
-    Serial.println("Error: Keep diameter between 1-20mm.");
-    return;
-  }
+//   if (diameter < 1 || diameter > 20) {
+//     Serial.println("Error: Keep diameter between 1-20mm.");
+//     return;
+//   }
 
-  // 2. Define the Sweep Constraints
-  // Angle in degrees: 0 is flat right, 90 is straight up.
-  float minAngle = 0.0;  // Start 10 degrees off the X-axis
-  float maxAngle = 100.0;  // End 10 degrees before the Y-axis
+//   // 2. Define the Sweep Constraints
+//   // Angle in degrees: 0 is flat right, 90 is straight up.
+//   float minAngle = 0.0;  // Start 10 degrees off the X-axis
+//   float maxAngle = 100.0;  // End 10 degrees before the Y-axis
   
-  float maxReach = 310.0 - (diameter / 2.0); // Full extension minus spray radius
-  float minReach = 100.0;                     // Minimum extension to avoid base
+//   float maxReach = 310.0 - (diameter / 2.0); // Full extension minus spray radius
+//   float minReach = 100.0;                     // Minimum extension to avoid base
 
-  Serial.println("Starting Polar Sweep Path...");
+//   Serial.println("Starting Polar Sweep Path...");
 
-  // 3. The Radial Loop (Moving from far reach back toward the base)
-  for (float r = maxReach; r >= minReach; r -= diameter) {
+//   // 3. The Radial Loop (Moving from far reach back toward the base)
+//   for (float r = maxReach; r >= minReach; r -= diameter) {
     
-    // Determine if we are sweeping "Up" or "Down" the arc
-    int layer = (int)((maxReach - r) / diameter);
+//     // Determine if we are sweeping "Up" or "Down" the arc
+//     int layer = (int)((maxReach - r) / diameter);
     
-    if (layer % 2 == 0) {
-      // Sweep from min to max angle
-      for (float deg = minAngle; deg <= maxAngle; deg += 2.0) {
-        float rad = radians(deg);
-        float targetX = r * cos(rad);
-        float targetY = r * sin(rad);
-        moveSmoothly(targetX, targetY, true, 7); 
-        delay(10); // Control sweep speed
-      }
-    } else {
-      // Sweep from max to min angle
-      for (float deg = maxAngle; deg >= minAngle; deg -= 2.0) {
-        float rad = radians(deg);
-        float targetX = r * cos(rad);
-        float targetY = r * sin(rad);
-        moveSmoothly(targetX, targetY, true, 7);
-        delay(10);
-      }
-    }
-  }
+//     if (layer % 2 == 0) {
+//       // Sweep from min to max angle
+//       for (float deg = minAngle; deg <= maxAngle; deg += 2.0) {
+//         float rad = radians(deg);
+//         float targetX = r * cos(rad);
+//         float targetY = r * sin(rad);
+//         moveSmoothly(targetX, targetY, true, 7); 
+//         delay(10); // Control sweep speed
+//       }
+//     } else {
+//       // Sweep from max to min angle
+//       for (float deg = maxAngle; deg >= minAngle; deg -= 2.0) {
+//         float rad = radians(deg);
+//         float targetX = r * cos(rad);
+//         float targetY = r * sin(rad);
+//         moveSmoothly(targetX, targetY, true, 7);
+//         delay(10);
+//       }
+//     }
+//   }
 
-  Serial.println("Polar Path Complete!");
-  homePosition();
-}
+//   Serial.println("Polar Path Complete!");
+//   homePosition();
+// }
 
 void homePosition(){
   shoulderServo.write(initialShoulder);
@@ -365,3 +392,9 @@ void loop() {
     }
   }
 }
+
+// 142 mm Width
+// 109 mm Height
+// 195-200 mm Distance from surface
+
+
